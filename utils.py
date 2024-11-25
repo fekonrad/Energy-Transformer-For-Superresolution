@@ -40,7 +40,8 @@ def gen_structured_mask_id(num_patch: int, batch_size: int):
     # Create mask indices for one batch
     mask_indices = []
     for patch_idx in range(num_patch):
-        # For each patch, add indices for the 3 masked pixels
+        # For each patch, a
+        # dd indices for the 3 masked pixels
         mask_indices.extend([patch_idx] * masks_per_patch)
     
     # Convert to tensor and repeat for each batch
