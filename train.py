@@ -23,6 +23,7 @@ from image_et import (
 
 from time import time
 from accelerate import Accelerator
+import torch.nn.functional as F
 
 
 def make_dir(dir_name: str):
@@ -171,7 +172,7 @@ def main(args):
         input_size = (input_size // patch_size + 1) * patch_size
     
     x = torch.randn(1, 3, input_size, input_size)
-    patch_fn = Patch(dim=patch_size)
+    patch_fn = Patch(dim=patch_size, n=input_size)
     model = ET(
         x,
         patch_fn,
@@ -250,45 +251,33 @@ def main(args):
             # Generate superresolution training data
             input_data, target_data, haar_mask = generate_superres_data(hr_images)
             
-            # Convert the spatial mask to patch-based mask indices
-            patch_input = patch_fn(input_data)
-            patch_target = patch_fn(target_data)
+            # Create mask for the transformer
+            # Convert spatial mask to patch mask
+            patch_mask = patch_fn(haar_mask.float().unsqueeze(0).unsqueeze(0))
+            patch_mask = (patch_mask.sum(dim=-1) > 0).squeeze()
             
-            # Find which patches contain the masked (unknown) coefficients
-            patch_mask_flattened = patch_fn(haar_mask.float().unsqueeze(0).expand(batch_size, -1, -1, -1))
-            
-            # Create mask indices for patches that contain unknown coefficients
-            mask_patches = (patch_mask_flattened.sum(dim=-1) > 0).squeeze()
-            
-            # Generate batch and mask indices
+            # Create batch indices for masked patches
             batch_indices = []
-            mask_indices = []
-            
             for b in range(batch_size):
-                masked_patch_ids = torch.where(mask_patches[b])[0]
-                batch_indices.extend([b] * len(masked_patch_ids))
-                mask_indices.extend(masked_patch_ids.tolist())
+                masked_indices = torch.where(patch_mask)[0]
+                batch_indices.extend([b] * len(masked_indices))
             
             if len(batch_indices) == 0:
-                continue  # Skip if no patches to predict
+                continue
                 
-            batch_id = torch.tensor(batch_indices, dtype=torch.long)
-            mask_id = torch.tensor(mask_indices, dtype=torch.long)
+            batch_indices = torch.tensor(batch_indices, device=device)
             
-            # Move to device
-            input_data, target_data, batch_id, mask_id = map(
-                lambda z: z.to(device), (input_data, target_data, batch_id, mask_id)
-            )
-
             # Forward pass
-            pred = model(input_data, mask=(batch_id, mask_id), alpha=args.alpha)
-
-            # Extract predictions for masked patches
-            pred_patches = pred[batch_id, mask_id]
-            target_patches = patch_target[batch_id, mask_id]
-
-            # Compute loss
-            loss = reduce((pred_patches - target_patches) ** 2, "b ... -> b", "mean").mean()
+            pred = model(input_data, mask=(batch_indices, patch_mask))
+            
+            # Convert predictions back to image space
+            pred_patches = patch_fn(pred, reverse=True)
+            
+            # Compute loss only on masked regions
+            loss = F.mse_loss(
+                pred_patches[haar_mask],
+                target_data[haar_mask]
+            )
             
             accelerator.backward(loss)
 
@@ -319,45 +308,26 @@ def main(args):
                     test_hr = x[:visual_num]
                     test_input, test_target, test_mask = generate_superres_data(test_hr)
                     
-                    # Create low-resolution version for comparison
-                    test_lr = torch.nn.functional.avg_pool2d(test_hr, kernel_size=2, stride=2)
+                    # Create patch mask for visualization
+                    test_patch_mask = patch_fn(test_mask.float().unsqueeze(0).unsqueeze(0))
+                    test_patch_mask = (test_patch_mask.sum(dim=-1) > 0).squeeze()
                     
-                    # Get model predictions
-                    patch_test_input = patch_fn(test_input)
-                    patch_test_mask = patch_fn(test_mask.float().unsqueeze(0).expand(visual_num, -1, -1, -1))
-                    test_mask_patches = (patch_test_mask.sum(dim=-1) > 0).squeeze()
-                    
-                    # Generate batch and mask indices for visualization
+                    # Create batch indices
                     test_batch_indices = []
-                    test_mask_indices = []
-                    
-                    for b in range(visual_num):
-                        masked_patch_ids = torch.where(test_mask_patches[b])[0]
-                        test_batch_indices.extend([b] * len(masked_patch_ids))
-                        test_mask_indices.extend(masked_patch_ids.tolist())
+                    masked_indices = torch.where(test_patch_mask)[0]
+                    test_batch_indices.extend([0] * len(masked_indices))
                     
                     if len(test_batch_indices) > 0:
-                        test_batch_id = torch.tensor(test_batch_indices, dtype=torch.long).to(device)
-                        test_mask_id = torch.tensor(test_mask_indices, dtype=torch.long).to(device)
+                        test_batch_indices = torch.tensor(test_batch_indices, device=device)
                         
-                        test_pred = model(test_input.to(device), mask=(test_batch_id, test_mask_id), alpha=args.alpha)
+                        # Get predictions
+                        test_pred = model(test_input.to(device), mask=(test_batch_indices, test_patch_mask))
                         
-                        # Reconstruct the full predicted Haar coefficients
-                        pred_haar = test_input.clone()
-                        pred_patches = patch_fn(pred_haar)
-                        pred_patches[test_batch_id, test_mask_id] = test_pred[test_batch_id, test_mask_id]
-                        pred_haar = patch_fn(pred_patches, reverse=True)
+                        # Convert predictions back to image space
+                        pred_image = patch_fn(test_pred, reverse=True)
                         
-                        # Convert back to image space
-                        pred_image = inverse_haar_wavelet_transform(pred_haar.cpu())
-                        
-                        # Resize low-resolution image for comparison
-                        test_lr_resized = torch.nn.functional.interpolate(
-                            test_lr, size=test_hr.shape[-2:], mode='nearest'
-                        )
-                        
-                        # Create visualization: [low_res, ground_truth_hr, predicted_hr]
-                        img = torch.cat([test_lr_resized, test_hr, pred_image], dim=0)
+                        # Create visualization grid
+                        img = torch.cat([test_input, test_target, pred_image], dim=0)
                         img = unnormalize_fn(img)
 
                         save_image(
