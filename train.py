@@ -302,8 +302,11 @@ def main(args):
             opt.step()
             opt.zero_grad()
             running_loss += loss.item()
+            break
 
-        torch.cuda.synchronize()
+        if device == "cuda":
+            torch.cuda.synchronize()
+            
         end_time = time()
         scheduler.step(running_loss)
 
@@ -327,11 +330,12 @@ def main(args):
                     test_mask_float = test_mask.float().unsqueeze(0).unsqueeze(0)
                     test_patch_mask = patch_fn(test_mask_float)
                     test_patch_mask = (test_patch_mask.sum(dim=-1) > 0).squeeze().to(device)  # shape: [N]
-                    
+
                     # Create full mask for test batch
                     B_vis = test_input.size(0)
                     test_full_mask = test_patch_mask.unsqueeze(0).expand(B_vis, -1).clone()  # shape: [B_vis, N]
-                     
+                    print(test_full_mask[0])
+
                     # Get predictions
                     test_pred = model(test_input.to(device), mask=test_full_mask, alpha=args.alpha)
                      
