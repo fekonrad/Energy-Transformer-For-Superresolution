@@ -128,13 +128,10 @@ def generate_superres_data(hr_images):
     """
     batch_size, channels, h, w = hr_images.shape
     
-    # Step 1: Downscale the high-resolution image using average pooling
-    lr_images = torch.nn.functional.avg_pool2d(hr_images, kernel_size=2, stride=2)
-    
-    # Step 2: Apply Haar wavelet transform to the high-resolution target
+    # Apply Haar wavelet transform to the high-resolution target
     hr_haar_coeffs = haar_wavelet_transform(hr_images)
     
-    # Step 3: Create input data - we know the LL coefficients from the low-res image
+    # Create input data - we know the LL coefficients from the low-res image
     # The LL coefficients of the HR image should correspond to the LR image
     input_data = torch.zeros_like(hr_haar_coeffs)
     input_data[:, :, :h//2, :w//2] = hr_haar_coeffs[:, :, :h//2, :w//2]  # Fill LL quadrant with LR image
@@ -163,18 +160,33 @@ def main(args):
         make_dir(IMAGE_FOLDER)
         make_dir(MODEL_FOLDER)
 
-    # For superresolution, we work with upscaled images
-    # Adjust input size to ensure patch size compatibility
+    # ---------------------------------------------
+    # 1. Load dataset first – we need its image size
+    # ---------------------------------------------
+    trainset, testset, unnormalize_fn = GetCIFAR(args.data_path, args.data_name)
+
+    # Assume square images (CIFAR is 32×32)
+    sample_img, _ = trainset[0]
+    _, H, W = sample_img.shape
+    assert H == W, "Dataset images must be square"
+
     patch_size = args.patch_size
-    input_size = 64  # Base size
-    # Ensure input size is divisible by patch size
+    input_size = H  # e.g. 32 for CIFAR-10/100
     if input_size % patch_size != 0:
         input_size = (input_size // patch_size + 1) * patch_size
-    
-    x = torch.randn(1, 3, input_size, input_size)
-    patch_fn = Patch(dim=patch_size, n=input_size)
+
+    print("\nInitialisation → dataset image side =", input_size)
+    print("patch_size =", patch_size,
+          "→ num patches =", (input_size // patch_size) ** 2)
+
+    # ------------------------------------------------
+    # 2. Build patcher and model using that input_size
+    # ------------------------------------------------
+    patch_fn = Patch(dim=patch_size, n=input_size)   # n MUST equal image side
+    x_dummy  = torch.randn(1, 3, input_size, input_size)
+
     model = ET(
-        x,
+        x_dummy,
         patch_fn,
         args.out_dim if args.out_dim is not None else patch_size * patch_size * 3,
         args.tkn_dim,
@@ -192,8 +204,9 @@ def main(args):
     if accelerator.is_main_process:
         print(f"Number of parameters: {count_parameters(model)}", flush=True)
 
-    trainset, testset, unnormalize_fn = GetCIFAR(args.data_path, args.data_name)
-
+    # ---------------------------------------------
+    # 3. Create dataloaders, optimiser, scheduler
+    # ---------------------------------------------
     train_loader, test_loader = map(
         lambda z: DataLoader(
             z,
@@ -251,32 +264,34 @@ def main(args):
             # Generate superresolution training data
             input_data, target_data, haar_mask = generate_superres_data(hr_images)
             
-            # Create mask for the transformer
             # Convert spatial mask to patch mask
-            patch_mask = patch_fn(haar_mask.float().unsqueeze(0).unsqueeze(0))
+            # First, convert the boolean mask to float and add necessary dimensions
+            haar_mask_float = haar_mask.float().unsqueeze(0).unsqueeze(0)
+            
+            # Apply patch function to get patch-level mask
+            patch_mask = patch_fn(haar_mask_float)
+            
+            # Convert to boolean mask based on whether any pixel in the patch is masked
             patch_mask = (patch_mask.sum(dim=-1) > 0).squeeze()
             
-            # Create batch indices for masked patches
-            batch_indices = []
+            # Create mask tensor for each batch item
+            full_mask = torch.zeros((batch_size, patch_mask.size(0)), dtype=torch.bool, device=device)
             for b in range(batch_size):
-                masked_indices = torch.where(patch_mask)[0]
-                batch_indices.extend([b] * len(masked_indices))
+                full_mask[b] = patch_mask
             
-            if len(batch_indices) == 0:
-                continue
-                
-            batch_indices = torch.tensor(batch_indices, device=device)
-            
-            # Forward pass
-            pred = model(input_data, mask=(batch_indices, patch_mask))
+            # Forward pass with the full mask
+            pred = model(input_data, mask=full_mask, alpha=args.alpha)
             
             # Convert predictions back to image space
             pred_patches = patch_fn(pred, reverse=True)
             
-            # Compute loss only on masked regions
+            # Compute loss only on masked regions (high frequency components)
+            # Expand spatial mask to (B, C, H, W) so it matches pred_patches
+            mask_expanded = haar_mask.unsqueeze(0).unsqueeze(0).expand(batch_size, pred_patches.size(1), -1, -1)
+
             loss = F.mse_loss(
-                pred_patches[haar_mask],
-                target_data[haar_mask]
+                pred_patches[mask_expanded],
+                target_data[mask_expanded]
             )
             
             accelerator.backward(loss)
@@ -305,38 +320,36 @@ def main(args):
             if accelerator.is_main_process:
                 with torch.no_grad():
                     # Generate visualization
-                    test_hr = x[:visual_num]
+                    test_hr = x_dummy[:visual_num] # Use x_dummy for visualization
                     test_input, test_target, test_mask = generate_superres_data(test_hr)
                     
-                    # Create patch mask for visualization
-                    test_patch_mask = patch_fn(test_mask.float().unsqueeze(0).unsqueeze(0))
+                    # Create visualization mask
+                    test_mask_float = test_mask.float().unsqueeze(0).unsqueeze(0)
+                    test_patch_mask = patch_fn(test_mask_float)
                     test_patch_mask = (test_patch_mask.sum(dim=-1) > 0).squeeze()
                     
-                    # Create batch indices
-                    test_batch_indices = []
-                    masked_indices = torch.where(test_patch_mask)[0]
-                    test_batch_indices.extend([0] * len(masked_indices))
+                    # Create full mask for test batch
+                    test_full_mask = torch.zeros((visual_num, test_patch_mask.size(0)), dtype=torch.bool, device=device)
+                    for b in range(visual_num):
+                        test_full_mask[b] = test_patch_mask
                     
-                    if len(test_batch_indices) > 0:
-                        test_batch_indices = torch.tensor(test_batch_indices, device=device)
-                        
-                        # Get predictions
-                        test_pred = model(test_input.to(device), mask=(test_batch_indices, test_patch_mask))
-                        
-                        # Convert predictions back to image space
-                        pred_image = patch_fn(test_pred, reverse=True)
-                        
-                        # Create visualization grid
-                        img = torch.cat([test_input, test_target, pred_image], dim=0)
-                        img = unnormalize_fn(img)
+                    # Get predictions
+                    test_pred = model(test_input.to(device), mask=test_full_mask, alpha=args.alpha)
+                    
+                    # Convert predictions back to image space
+                    pred_image = patch_fn(test_pred, reverse=True)
+                    
+                    # Create visualization grid
+                    img = torch.cat([test_input, test_target, pred_image], dim=0)
+                    img = unnormalize_fn(img)
 
-                        save_image(
-                            img,
-                            IMAGE_FOLDER + "/{0}.png".format(i),
-                            nrow=visual_num,
-                            normalize=True,
-                            scale_each=True,
-                        )
+                    save_image(
+                        img,
+                        IMAGE_FOLDER + "/{0}.png".format(i),
+                        nrow=visual_num,
+                        normalize=True,
+                        scale_each=True,
+                    )
                 
                 # Save checkpoint
                 try:
