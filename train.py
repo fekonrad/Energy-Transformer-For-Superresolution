@@ -142,7 +142,7 @@ def generate_superres_data(hr_images):
     target_data = hr_haar_coeffs
     
     # Step 5: Create mask for the unknown coefficients (high-frequency components)
-    mask = torch.zeros(hr_haar_coeffs.shape[2:], dtype=torch.bool)
+    mask = torch.zeros((h, w), dtype=torch.bool, device=hr_images.device)
     mask[:h//2, w//2:] = True  # LH region
     mask[h//2:, :w//2] = True  # HL region
     mask[h//2:, w//2:] = True  # HH region
@@ -163,12 +163,19 @@ def main(args):
         make_dir(MODEL_FOLDER)
 
     # For superresolution, we work with upscaled images
-    x = torch.randn(1, 3, 64, 64)  # 2x upscaled from 32x32
-    patch_fn = Patch(dim=args.patch_size)
+    # Adjust input size to ensure patch size compatibility
+    patch_size = args.patch_size
+    input_size = 64  # Base size
+    # Ensure input size is divisible by patch size
+    if input_size % patch_size != 0:
+        input_size = (input_size // patch_size + 1) * patch_size
+    
+    x = torch.randn(1, 3, input_size, input_size)
+    patch_fn = Patch(dim=patch_size)
     model = ET(
         x,
         patch_fn,
-        args.out_dim,
+        args.out_dim if args.out_dim is not None else patch_size * patch_size * 3,
         args.tkn_dim,
         args.qk_dim,
         args.nheads,
