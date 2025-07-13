@@ -265,30 +265,24 @@ def main(args):
             input_data, target_data, haar_mask = generate_superres_data(hr_images)
             
             # Convert spatial mask to patch mask
-            # First, convert the boolean mask to float and add necessary dimensions
             haar_mask_float = haar_mask.float().unsqueeze(0).unsqueeze(0)
-            
-            # Apply patch function to get patch-level mask
             patch_mask = patch_fn(haar_mask_float)
-            
-            # Convert to boolean mask based on whether any pixel in the patch is masked
-            patch_mask = (patch_mask.sum(dim=-1) > 0).squeeze()
-            
-            # Create mask tensor for each batch item
-            full_mask = torch.zeros((batch_size, patch_mask.size(0)), dtype=torch.bool, device=device)
-            for b in range(batch_size):
-                full_mask[b] = patch_mask
-            
+            patch_mask = (patch_mask.sum(dim=-1) > 0).squeeze()  # shape: [N]
+            patch_mask = patch_mask.to(device)
+ 
+            # Broadcast patch mask to full batch
+            full_mask = patch_mask.unsqueeze(0).expand(batch_size, -1).clone()  # shape: [B, N]
+ 
             # Forward pass with the full mask
             pred = model(input_data, mask=full_mask, alpha=args.alpha)
-            
+             
             # Convert predictions back to image space
             pred_patches = patch_fn(pred, reverse=True)
-            
+             
             # Compute loss only on masked regions (high frequency components)
             # Expand spatial mask to (B, C, H, W) so it matches pred_patches
             mask_expanded = haar_mask.unsqueeze(0).unsqueeze(0).expand(batch_size, pred_patches.size(1), -1, -1)
-
+ 
             loss = F.mse_loss(
                 pred_patches[mask_expanded],
                 target_data[mask_expanded]
@@ -320,22 +314,22 @@ def main(args):
             if accelerator.is_main_process:
                 with torch.no_grad():
                     # Generate visualization
-                    test_hr = x_dummy[:visual_num] # Use x_dummy for visualization
+                    # Create a batch for visualization; replicate the dummy image if needed
+                    test_hr = x_dummy.repeat(visual_num, 1, 1, 1)[:visual_num]
                     test_input, test_target, test_mask = generate_superres_data(test_hr)
                     
                     # Create visualization mask
                     test_mask_float = test_mask.float().unsqueeze(0).unsqueeze(0)
                     test_patch_mask = patch_fn(test_mask_float)
-                    test_patch_mask = (test_patch_mask.sum(dim=-1) > 0).squeeze()
+                    test_patch_mask = (test_patch_mask.sum(dim=-1) > 0).squeeze().to(device)  # shape: [N]
                     
                     # Create full mask for test batch
-                    test_full_mask = torch.zeros((visual_num, test_patch_mask.size(0)), dtype=torch.bool, device=device)
-                    for b in range(visual_num):
-                        test_full_mask[b] = test_patch_mask
-                    
+                    B_vis = test_input.size(0)
+                    test_full_mask = test_patch_mask.unsqueeze(0).expand(B_vis, -1).clone()  # shape: [B_vis, N]
+                     
                     # Get predictions
                     test_pred = model(test_input.to(device), mask=test_full_mask, alpha=args.alpha)
-                    
+                     
                     # Convert predictions back to image space
                     pred_image = patch_fn(test_pred, reverse=True)
                     
