@@ -9,7 +9,7 @@ from torch.utils.data.dataloader import DataLoader
 from torchvision.transforms import Resize, InterpolationMode
 from torchvision.utils import save_image
 
-"""
+
 from image_et import (
     ImageET as ET,
     Patch,
@@ -20,7 +20,7 @@ from image_et import (
     str2bool,
     get_latest_file,
 )
-"""
+
 from time import time
 from accelerate import Accelerator
 
