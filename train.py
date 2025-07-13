@@ -332,13 +332,18 @@ def main(args):
                      
                     # Convert predictions back to image space
                     pred_image = patch_fn(test_pred, reverse=True)
-                    
-                    # Create visualization grid
-                    img = torch.cat([test_input, test_target, pred_image], dim=0)
-                    img = unnormalize_fn(img)
 
+                    # Move all tensors to CPU before concatenation for save_image
+                    img_cpu = torch.cat([
+                        test_input.cpu(),
+                        test_target.cpu(),
+                        pred_image.cpu()
+                    ], dim=0)
+
+                    img_cpu = unnormalize_fn(img_cpu)
+ 
                     save_image(
-                        img,
+                        img_cpu,
                         IMAGE_FOLDER + "/{0}.png".format(i),
                         nrow=visual_num,
                         normalize=True,
