@@ -205,7 +205,13 @@ def main(args):
         print(f"Number of parameters: {count_parameters(model)}", flush=True)
 
     # ---------------------------------------------
-    # 3. Create dataloaders, optimiser, scheduler
+    # 3. Select a fixed batch from dataset for visualization
+    # ---------------------------------------------
+    visual_num = 16  # number of images to visualise
+    viz_hr = torch.stack([testset[i][0] for i in range(visual_num)])  # shape [visual_num, C, H, W]
+
+    # ---------------------------------------------
+    # 4. Create dataloaders, optimiser, scheduler
     # ---------------------------------------------
     train_loader, test_loader = map(
         lambda z: DataLoader(
@@ -249,7 +255,7 @@ def main(args):
         model, opt, train_loader, test_loader, scheduler
     )
 
-    visual_num = 16
+    # visual_num already defined above (kept for consistency)
     training_display = range(start_epoch, args.epochs + 1)
 
     for i in training_display:
@@ -313,9 +319,8 @@ def main(args):
         if i % args.ckpt_every == 0:
             if accelerator.is_main_process:
                 with torch.no_grad():
-                    # Generate visualization
-                    # Create a batch for visualization; replicate the dummy image if needed
-                    test_hr = x_dummy.repeat(visual_num, 1, 1, 1)[:visual_num]
+                    # Use the fixed batch selected at startup for visualisation
+                    test_hr = viz_hr.to(device)
                     test_input, test_target, test_mask = generate_superres_data(test_hr)
                     
                     # Create visualization mask
