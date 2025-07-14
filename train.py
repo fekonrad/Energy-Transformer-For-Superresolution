@@ -290,8 +290,8 @@ def main(args):
             mask_expanded = haar_mask.unsqueeze(0).unsqueeze(0).expand(batch_size, pred_patches.size(1), -1, -1)
  
             loss = F.mse_loss(
-                pred_patches[mask_expanded],
-                target_data[mask_expanded]
+                pred_patches,
+                target_data
             )
             
             accelerator.backward(loss)
@@ -302,7 +302,7 @@ def main(args):
             opt.step()
             opt.zero_grad()
             running_loss += loss.item()
-
+            
         if device == "cuda":
             torch.cuda.synchronize()
             
@@ -426,7 +426,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     main(args)
-        
+
     """
     # Quick Test for data generation routine. Seems to work fine!
     import matplotlib.pyplot as plt
@@ -450,11 +450,11 @@ if __name__ == "__main__":
     plt.subplots_adjust(wspace=0, hspace=0)
     
     # Add title with smaller font and less padding
-    plt.suptitle("Wavelet Representation of CIFAR-10 Images;\n"
-              "1st Row: Original Images,\n"
-              "2nd Row: Organized Coefficients of Haar Wavelet Representation of Downscaled Images (Input),\n"
-              "3rd Row: Haar Coefficients of High-Resolution Images (Target)",
-              fontsize=10, y=1.02)
+    # plt.suptitle("Wavelet Representation of CIFAR-10 Images;\n"
+    #           "1st Row: Original Images,\n"
+    #           "2nd Row: Organized Coefficients of Haar Wavelet Representation of Downscaled Images (Input),\n"
+    #           "3rd Row: Haar Coefficients of High-Resolution Images (Target)",
+    #           fontsize=10, y=1.02)
     
     # Save with tight bounding box
     plt.savefig("wavelet_representation.png", bbox_inches='tight', pad_inches=0.1)
