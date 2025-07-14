@@ -302,7 +302,6 @@ def main(args):
             opt.step()
             opt.zero_grad()
             running_loss += loss.item()
-            break
 
         if device == "cuda":
             torch.cuda.synchronize()
