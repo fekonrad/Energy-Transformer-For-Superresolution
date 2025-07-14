@@ -344,3 +344,179 @@ class ET(nn.Module):
         if return_energy:
             return yh, energies
         return yh
+
+
+class ET_Langevin(nn.Module):
+    def __init__(
+        self,
+        x: TENSOR,
+        patch: Union[nn.Module, Callable],
+        out_dim: Optional[int] = None,
+        tkn_dim: int = 256,
+        qk_dim: int = 64,
+        nheads: int = 12,
+        hn_mult: float = 4.0,
+        attn_beta: Optional[float] = None,
+        attn_bias: bool = False,
+        hn_bias: bool = False,
+        hn_fn: Callable = lambda x: -0.5 * (F.relu(x) ** 2.0).sum(),
+        time_steps: int = 1,
+        blocks: int = 1,
+        noise: float = 0.01,
+    ):
+        super().__init__()
+
+        x = patch(x)
+        _, n, d = x.shape
+
+        self.K = time_steps
+
+        self.patch = patch
+
+        self.encode = nn.Sequential(
+            nn.Linear(d, tkn_dim),
+        )
+
+        self.decode = nn.Sequential(
+            nn.LayerNorm(tkn_dim, tkn_dim),
+            nn.Linear(tkn_dim, out_dim if out_dim is not None else d),
+        )
+
+        self.pos = PositionEncode(tkn_dim, n + 1)
+
+        self.cls = nn.Parameter(torch.ones(1, 1, tkn_dim))
+
+        self.mask = nn.Parameter(torch.normal(0, 0.002, size=[1, 1, tkn_dim]))
+
+        self.blocks = nn.ModuleList(
+            [
+                nn.ModuleList(
+                    [
+                        EnergyLayerNorm(tkn_dim),
+                        ETBlock(
+                            tkn_dim,
+                            qk_dim,
+                            nheads,
+                            hn_mult,
+                            attn_beta,
+                            attn_bias,
+                            hn_bias,
+                            hn_fn,
+                        ),
+                    ]
+                )
+                for _ in range(blocks)
+            ]
+        )
+        self.noise = noise
+
+    def visualize(
+        self,
+        x: TENSOR,
+        mask: Optional[TENSOR] = None,
+        alpha: float = 1.0,
+        *,
+        attn_mask: Optional[Sequence[TENSOR]] = None,
+    ):
+
+        x = self.patch(x)
+        x = self.encode(x)
+
+        if mask is not None:
+            x[:, mask] = self.mask
+
+        # create grad_mask for visualize steps as well
+        grad_mask = None
+        if mask is not None:
+            false_col = torch.zeros(mask.shape[0], 1, dtype=torch.bool, device=mask.device)
+            grad_mask = torch.cat([false_col, mask], dim=1)
+
+        x = torch.cat([self.cls.repeat(x.size(0), 1, 1), x], dim=1)
+        x = self.pos(x)
+
+        energies = []
+        embeddings = [self.patch(self.decode(x)[:, 1:], reverse=True)]
+
+        for norm, et in self.blocks:
+            for _ in range(self.K):
+                g = norm(x)
+                dEdg, E = torch.func.grad_and_value(et)(g, attn_mask)
+                if grad_mask is not None:
+                    dEdg = dEdg.masked_fill(~grad_mask[..., None], 0.)
+
+                x = x - alpha * dEdg
+
+                energies.append(E)
+
+                embeddings.append(self.patch(self.decode(x)[:, 1:], reverse=True))
+
+        g = norm(x)
+        energies.append(et(g, attn_mask))
+        return energies, embeddings
+
+    def evolve(
+        self,
+        x: TENSOR,
+        alpha: float,
+        mask: Optional[TENSOR] = None,
+        *,
+        attn_mask: Optional[Sequence[TENSOR]] = None,
+        return_energy: bool = False,
+    ):
+        energies = [] if return_energy else None
+
+        for norm, et in self.blocks:
+            for _ in range(self.K):
+                g = norm(x)
+                dEdg, E = torch.func.grad_and_value(et)(g, attn_mask)
+                dEdg = dEdg.masked_fill(~mask[..., None], 0.)
+
+                x = x - alpha * dEdg + self.noise * torch.randn_like(x)
+
+                if return_energy:
+                    energies.append(E)
+
+        if return_energy:
+            g = norm(x)
+            E = et(g, attn_mask)
+            energies.append(E)
+
+        return x, energies
+
+    def forward(
+        self,
+        x: TENSOR,
+        mask: Optional[TENSOR] = None,
+        attn_mask: Optional[Sequence[TENSOR]] = None,
+        *,
+        alpha: float = 1.0,
+        return_energy: bool = False,
+        use_cls: bool = False,
+    ):
+        x = self.patch(x)
+        x = self.encode(x)
+
+        if mask is not None:
+            x[mask] = self.mask
+
+        x = torch.cat([self.cls.repeat(x.size(0), 1, 1), x], dim=1)
+        x = self.pos(x)
+
+        # ------------------------------------------------------------------
+        # Build a gradient-mask that aligns with CLS + tokens sequence length
+        # (prepend a 'False' column for the CLS token so shape == B × (N+1))
+        grad_mask = None
+        if mask is not None:
+            false_col = torch.zeros(mask.shape[0], 1, dtype=torch.bool, device=mask.device)
+            grad_mask = torch.cat([false_col, mask], dim=1)  # shape (B, N+1)
+
+        x, energies = self.evolve(
+            x, alpha, mask=grad_mask, attn_mask=attn_mask, return_energy=return_energy
+        )
+
+        x = self.decode(x)
+        yh = x[:, :1] if use_cls else x[:, 1:]
+
+        if return_energy:
+            return yh, energies
+        return yh
