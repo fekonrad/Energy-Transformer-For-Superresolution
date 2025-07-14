@@ -333,8 +333,7 @@ def main(args):
                     # Create full mask for test batch
                     B_vis = test_input.size(0)
                     test_full_mask = test_patch_mask.unsqueeze(0).expand(B_vis, -1).clone()  # shape: [B_vis, N]
-                    # print(test_full_mask[0])
-
+                    
                     # Get predictions
                     test_pred = model(test_input.to(device), mask=test_full_mask, alpha=args.alpha)
                      
@@ -427,14 +426,37 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     main(args)
-
+        
     """
     # Quick Test for data generation routine. Seems to work fine!
-
     import matplotlib.pyplot as plt
-    x = torch.tensor([[[[2.0, -1.0], [3.0, -2.0]]]])
-    x, y, mask = generate_superres_data(x)
-    print(x)
-    print(y)
-    print(mask)
+
+    trainset, testset, unnormalize_fn = GetCIFAR("./", "cifar10")
+    sample_imgs = torch.stack([trainset[i][0] for i in range(10)])
+    
+    x, y, mask = generate_superres_data(sample_imgs)
+
+    # Create a larger figure with specified dimensions
+    fig, ax = plt.subplots(nrows=3, ncols=10, figsize=(15, 5))
+    for i in range(10):
+        ax[0, i].imshow(sample_imgs[i].permute(1, 2, 0))
+        ax[0, i].axis("off")
+        ax[1, i].imshow(x[i].permute(1, 2, 0))
+        ax[1, i].axis("off")
+        ax[2, i].imshow(y[i].permute(1, 2, 0))
+        ax[2, i].axis("off")
+    
+    # Remove padding/spacing between subplots
+    plt.subplots_adjust(wspace=0, hspace=0)
+    
+    # Add title with smaller font and less padding
+    plt.suptitle("Wavelet Representation of CIFAR-10 Images;\n"
+              "1st Row: Original Images,\n"
+              "2nd Row: Organized Coefficients of Haar Wavelet Representation of Downscaled Images (Input),\n"
+              "3rd Row: Haar Coefficients of High-Resolution Images (Target)",
+              fontsize=10, y=1.02)
+    
+    # Save with tight bounding box
+    plt.savefig("wavelet_representation.png", bbox_inches='tight', pad_inches=0.1)
+    plt.show()
     """
