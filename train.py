@@ -175,9 +175,9 @@ def main(args):
     if input_size % patch_size != 0:
         input_size = (input_size // patch_size + 1) * patch_size
 
-    print("\nInitialisation → dataset image side =", input_size)
-    print("patch_size =", patch_size,
-          "→ num patches =", (input_size // patch_size) ** 2)
+    # print("\nInitialisation → dataset image side =", input_size)
+    # print("patch_size =", patch_size,
+        #   "→ num patches =", (input_size // patch_size) ** 2)
 
     # ------------------------------------------------
     # 2. Build patcher and model using that input_size
@@ -334,7 +334,7 @@ def main(args):
                     # Create full mask for test batch
                     B_vis = test_input.size(0)
                     test_full_mask = test_patch_mask.unsqueeze(0).expand(B_vis, -1).clone()  # shape: [B_vis, N]
-                    print(test_full_mask[0])
+                    # print(test_full_mask[0])
 
                     # Get predictions
                     test_pred = model(test_input.to(device), mask=test_full_mask, alpha=args.alpha)
